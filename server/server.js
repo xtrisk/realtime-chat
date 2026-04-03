@@ -11,7 +11,6 @@ import User from './models/User.js';
 import Message from './models/Message.js';
 
 dotenv.config();
- 
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -53,10 +52,12 @@ const verifyJWT = (req, res, next) => {
 
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
-  if (!username || !email || !password) return res.status(400).json({ message: 'All fields required' });
+  if (!username || !email || !password)
+    return res.status(400).json({ message: 'All fields required' });
 
   try {
-    if (await User.findOne({ email })) return res.status(400).json({ message: 'User already exists' });
+    if (await User.findOne({ email }))
+      return res.status(400).json({ message: 'User already exists' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await new User({ username, email, password: hashedPassword }).save();
@@ -69,13 +70,14 @@ app.post('/api/register', async (req, res) => {
 
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ message: 'All fields required' });
+  if (!email || !password)
+    return res.status(400).json({ message: 'All fields required' });
 
   try {
     const user = await User.findOne({ email });
-    if (!user || !(await bcrypt.compare(password, user.password))) {
+    if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(400).json({ message: 'Invalid credentials' });
-    }
+
     const token = generateToken(user._id);
     res.json({ token, userId: user._id, username: user.username });
   } catch (err) {
@@ -83,10 +85,12 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+
 app.get('/api/messages', verifyJWT, async (req, res) => {
   try {
     const { recipient } = req.query;
     let query = { recipient: null };
+
     if (recipient) {
       query = {
         $or: [
@@ -94,6 +98,11 @@ app.get('/api/messages', verifyJWT, async (req, res) => {
           { sender: recipient, recipient: req.userId }
         ]
       };
+
+      await Message.updateMany(
+        { sender: recipient, recipient: req.userId, read: false },
+        { $set: { read: true } }
+      );
     }
 
     const messages = await Message.find(query)
@@ -110,7 +119,7 @@ app.get('/api/messages', verifyJWT, async (req, res) => {
 
 app.get('/api/messages/conversations', verifyJWT, async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = new mongoose.Types.ObjectId(req.userId);
     const currentUser = await User.findById(userId);
     const blockedByMe = currentUser.blockedUsers.map(id => id.toString());
     const blockedMe = await User.find({ blockedUsers: userId }).distinct('_id');
@@ -122,7 +131,7 @@ app.get('/api/messages/conversations', verifyJWT, async (req, res) => {
         $match: {
           $or: [
             { sender: userId, recipient: { $ne: null } },
-            { recipient: userId, sender: { $ne: null } }
+            { recipient: userId }
           ]
         }
       },
@@ -140,7 +149,12 @@ app.get('/api/messages/conversations', verifyJWT, async (req, res) => {
           unreadCount: {
             $sum: {
               $cond: [
-                { $and: [{ $eq: ['$recipient', userId] }, { $eq: ['$read', false] }] },
+                {
+                  $and: [
+                    { $eq: ['$recipient', userId] },
+                    { $eq: ['$read', false] }
+                  ]
+                },
                 1,
                 0
               ]
@@ -151,23 +165,39 @@ app.get('/api/messages/conversations', verifyJWT, async (req, res) => {
       { $sort: { lastMessageTime: -1 } }
     ]);
 
-    const filtered = conversations.filter(conv => !excludeUsers.includes(conv._id.toString()));
+    const filtered = conversations.filter(
+      conv => conv._id && !excludeUsers.includes(conv._id.toString())
+    );
 
     const userIds = filtered.map(c => c._id);
     const users = await User.find({ _id: { $in: userIds } }).select('username _id');
     const userMap = new Map(users.map(u => [u._id.toString(), u]));
 
-    const result = filtered.map(conv => ({
-      user: userMap.get(conv._id.toString()),
-      lastMessage: conv.lastMessage,
-      lastMessageTime: conv.lastMessageTime,
-      unreadCount: conv.unreadCount
-    })).filter(conv => conv.user);
+    const result = filtered
+      .map(conv => ({
+        user: userMap.get(conv._id.toString()),
+        lastMessage: conv.lastMessage,
+        lastMessageTime: conv.lastMessageTime,
+        unreadCount: conv.unreadCount
+      }))
+      .filter(conv => conv.user);
 
     res.json(result);
   } catch (err) {
     console.error('Error fetching conversations:', err);
     res.status(500).json({ message: 'Failed to fetch conversations' });
+  }
+});
+
+app.post('/api/messages/read/:senderId', verifyJWT, async (req, res) => {
+  try {
+    await Message.updateMany(
+      { sender: req.params.senderId, recipient: req.userId, read: false },
+      { $set: { read: true } }
+    );
+    res.json({ message: 'Messages marked as read' });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to mark messages as read' });
   }
 });
 
@@ -190,21 +220,39 @@ app.get('/api/messages/requests', verifyJWT, async (req, res) => {
       recipient: { $in: senders }
     });
 
-    const requestSenderIds = senders.filter(id => !repliedTo.includes(id) && !excludeUsers.includes(id.toString()));
+    const everMessaged = await Message.distinct('recipient', {
+      sender: userId,
+      recipient: { $ne: null }
+    });
 
-    const requests = await Promise.all(requestSenderIds.map(async (senderId) => {
-      const lastMsg = await Message.findOne({
-        sender: senderId,
-        recipient: userId
-      }).sort({ createdAt: -1 }).limit(1);
-      const user = await User.findById(senderId).select('username _id');
-      if (!user || !lastMsg) return null;
-      return {
-        user,
-        lastMessage: lastMsg.content,
-        receivedAt: lastMsg.createdAt
-      };
-    }));
+    const everMessagedStrings = everMessaged.map(id => id.toString());
+    const repliedToStrings = repliedTo.map(id => id.toString());
+
+    const requestSenderIds = senders.filter(id => {
+      const idStr = id.toString();
+      return (
+        !repliedToStrings.includes(idStr) &&
+        !everMessagedStrings.includes(idStr) &&
+        !excludeUsers.includes(idStr)
+      );
+    });
+
+    const requests = await Promise.all(
+      requestSenderIds.map(async (senderId) => {
+        const lastMsg = await Message.findOne({
+          sender: senderId,
+          recipient: userId
+        }).sort({ createdAt: -1 }).limit(1);
+
+        const user = await User.findById(senderId).select('username _id');
+        if (!user || !lastMsg) return null;
+        return {
+          user,
+          lastMessage: lastMsg.content,
+          receivedAt: lastMsg.createdAt
+        };
+      })
+    );
 
     res.json(requests.filter(r => r !== null));
   } catch (err) {
@@ -212,6 +260,24 @@ app.get('/api/messages/requests', verifyJWT, async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch requests' });
   }
 });
+
+app.post('/api/messages/requests/accept/:senderId', verifyJWT, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.userId);
+    const senderId = req.params.senderId;
+
+    if (!currentUser.trustedUsers.map(id => id.toString()).includes(senderId)) {
+      currentUser.trustedUsers.push(senderId);
+      await currentUser.save();
+    }
+
+    res.json({ message: 'Request accepted, user trusted' });
+  } catch (err) {
+    console.error('Failed to accept request:', err);
+    res.status(500).json({ message: 'Failed to accept request' });
+  }
+});
+
 
 app.get('/api/users/search', verifyJWT, async (req, res) => {
   const { q } = req.query;
@@ -223,12 +289,14 @@ app.get('/api/users/search', verifyJWT, async (req, res) => {
     const users = await User.find({
       username: { $regex: q, $options: 'i' },
       _id: { $ne: req.userId }
-    }).select('_id username blockedUsers').limit(10);
+    })
+      .select('_id username blockedUsers')
+      .limit(10);
 
     const results = users.map(user => ({
       _id: user._id,
       username: user.username,
-      isBlockedByMe: currentUser.blockedUsers.includes(user._id),
+      isBlockedByMe: currentUser.blockedUsers.some(id => id.toString() === user._id.toString()),
       hasBlockedMe: blockedByIds.some(id => id.toString() === user._id.toString())
     }));
 
@@ -238,47 +306,13 @@ app.get('/api/users/search', verifyJWT, async (req, res) => {
   }
 });
 
-app.post('/api/users/block/:userId', verifyJWT, async (req, res) => {
-  try {
-    const currentUserId = req.userId;
-    const userToBlockId = req.params.userId;
-
-    if (currentUserId === userToBlockId) {
-      return res.status(400).json({ message: 'Cannot block yourself' });
-    }
-
-    const currentUser = await User.findById(currentUserId);
-    if (!currentUser.blockedUsers.includes(userToBlockId)) {
-      currentUser.blockedUsers.push(userToBlockId);
-      await currentUser.save();
-    }
-    res.json({ message: 'User blocked successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to block user' });
-  }
-});
-
-app.delete('/api/users/block/:userId', verifyJWT, async (req, res) => {
-  try {
-    const currentUserId = req.userId;
-    const userToUnblockId = req.params.userId;
-
-    const currentUser = await User.findById(currentUserId);
-    currentUser.blockedUsers = currentUser.blockedUsers.filter(
-      id => id.toString() !== userToUnblockId
-    );
-    await currentUser.save();
-    res.json({ message: 'User unblocked successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to unblock user' });
-  }
-});
-
 app.get('/api/users/trusted', verifyJWT, async (req, res) => {
   try {
     const currentUser = await User.findById(req.userId);
-    res.json(currentUser.trustedUsers.map(id => id.toString()));
+    if (!currentUser) return res.status(404).json({ message: 'User not found' });
+    res.json((currentUser.trustedUsers || []).map(id => id.toString()));
   } catch (err) {
+    console.error('Failed to fetch trusted users:', err);
     res.status(500).json({ message: 'Failed to fetch trusted users' });
   }
 });
@@ -310,16 +344,71 @@ app.delete('/api/users/trust/:userId', verifyJWT, async (req, res) => {
   }
 });
 
+app.post('/api/users/block/:userId', verifyJWT, async (req, res) => {
+  try {
+    const currentUserId = req.userId;
+    const userToBlockId = req.params.userId;
+
+    if (currentUserId === userToBlockId)
+      return res.status(400).json({ message: 'Cannot block yourself' });
+
+    const currentUser = await User.findById(currentUserId);
+
+    if (!currentUser.blockedUsers.map(id => id.toString()).includes(userToBlockId)) {
+      currentUser.blockedUsers.push(userToBlockId);
+    }
+
+    currentUser.trustedUsers = currentUser.trustedUsers.filter(
+      id => id.toString() !== userToBlockId
+    );
+
+    await currentUser.save();
+    res.json({ message: 'User blocked successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to block user' });
+  }
+});
+
+app.delete('/api/users/block/:userId', verifyJWT, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.userId);
+    const userToUnblockId = req.params.userId;
+
+    currentUser.blockedUsers = currentUser.blockedUsers.filter(
+      id => id.toString() !== userToUnblockId
+    );
+
+    if (!currentUser.trustedUsers.map(id => id.toString()).includes(userToUnblockId)) {
+      currentUser.trustedUsers.push(userToUnblockId);
+    }
+
+    await currentUser.save();
+    res.json({ message: 'User unblocked successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to unblock user' });
+  }
+});
 
 app.post('/api/users/bulk', verifyJWT, async (req, res) => {
   try {
     const { userIds } = req.body;
-    if (!userIds || !Array.isArray(userIds)) return res.status(400).json({ message: 'Invalid userIds' });
+    if (!userIds || !Array.isArray(userIds))
+      return res.status(400).json({ message: 'Invalid userIds' });
 
     const users = await User.find({ _id: { $in: userIds } }).select('username _id');
     res.json(users);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
+app.get('/api/users/:userId', verifyJWT, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId).select('username _id');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch user' });
   }
 });
 
@@ -352,7 +441,16 @@ io.on('connection', (socket) => {
           User.findById(senderId),
           User.findById(recipientId)
         ]);
-        if (sender.blockedUsers.includes(recipientId) || recipient.blockedUsers.includes(senderId)) {
+
+        if (!recipient) {
+          socket.emit('message-error', 'Recipient not found.');
+          return;
+        }
+
+        if (
+          sender.blockedUsers.map(id => id.toString()).includes(recipientId) ||
+          recipient.blockedUsers.map(id => id.toString()).includes(senderId)
+        ) {
           socket.emit('message-error', 'Cannot send message: you or the recipient has blocked the other.');
           return;
         }
@@ -361,7 +459,8 @@ io.on('connection', (socket) => {
       const message = new Message({
         sender: senderId,
         recipient: recipientId || null,
-        content: content.trim()
+        content: content.trim(),
+        read: false
       });
 
       await message.save();
@@ -372,11 +471,14 @@ io.on('connection', (socket) => {
       ]);
 
       const messageData = {
-        _id: message._id,
+        _id: populated._id,
         content: populated.content,
         sender: { _id: populated.sender._id, username: populated.sender.username },
-        recipient: populated.recipient ? { _id: populated.recipient._id, username: populated.recipient.username } : null,
+        recipient: populated.recipient
+          ? { _id: populated.recipient._id, username: populated.recipient.username }
+          : null,
         createdAt: populated.createdAt,
+        read: false
       };
 
       if (recipientId) {
@@ -388,6 +490,18 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('Error broadcasting message:', err.message);
       socket.emit('message-error', err.message);
+    }
+  });
+
+  socket.on('mark-read', async ({ senderId }) => {
+    if (!senderId) return;
+    try {
+      await Message.updateMany(
+        { sender: senderId, recipient: socket.userId, read: false },
+        { $set: { read: true } }
+      );
+    } catch (err) {
+      console.error('Failed to mark messages as read via socket:', err.message);
     }
   });
 
