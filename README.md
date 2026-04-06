@@ -101,3 +101,6 @@ Each part of the repository exposes a set of npm scripts for development and pro
 - `npm run dev` – Start the Vite development server.
 - `npm run build` – Build the React application for production.
 - `npm run preview` – Preview the production build locally.
+
+### Video
+https://vimeo.com/1179967793?share=copy&fl=sv&fe=ci
