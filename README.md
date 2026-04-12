@@ -104,3 +104,8 @@ Each part of the repository exposes a set of npm scripts for development and pro
 
 ### Video
 https://vimeo.com/1179967793?share=copy&fl=sv&fe=ci
+
+
+### AI Usage
+
+Deepseek AI was used whenever I faced complex error and coudlnt find that error by myself. 
